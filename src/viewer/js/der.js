@@ -1,10 +1,46 @@
-import * as asn1js from 'asn1js';
+import { fromBER } from 'asn1js';
 import { Certificate } from 'pkijs';
 import { ctLogNames } from './ctlognames.js';
 import { strings } from '../../i18n/strings.js';
-import { b64urltodec, b64urltohex, getObjPath, hash, hashify, pemToBER } from './utils.js';
+import { b64urltodec, b64urltohex, getObjPath, hash, hashify } from './utils.js';
 
+const getTimeZone = () => {
+  let timeZone = new Date().toString().match(/\(([A-Za-z\s].*)\)/);
+  if (timeZone === null) { // America/Chicago
+    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } else if (timeZone.length > 1) {
+    timeZone = timeZone[1]; // Central Daylight Time
+  } else {
+    timeZone = 'Local Time'; // not sure if this is right, but let's go with it for now
+  }
+  return timeZone;
+}
 
+const getPublicKeyInfo = (x509) => {
+  let spki = Object.assign({
+    crv: undefined,
+    e: undefined,
+    kty: undefined,
+    n: undefined,
+    keysize: undefined,
+    x: undefined,
+    xy: undefined,
+    y: undefined,
+  }, x509.subjectPublicKeyInfo);
+
+  if (spki.kty === 'RSA') {
+    spki.e = b64urltodec(spki.e);                      // exponent
+    spki.keysize = b64urltohex(spki.n).length * 8;     // key size in bits
+    spki.n = hashify(b64urltohex(spki.n));             // modulus
+  } else if (spki.kty === 'EC') {
+    spki.kty = 'Elliptic Curve';
+    spki.keysize = parseInt(spki.crv.split('-')[1])    // this is a bit hacky
+    spki.x = hashify(b64urltohex(spki.x));             // x coordinate
+    spki.y = hashify(b64urltohex(spki.y));             // y coordinate
+    spki.xy = `04:${spki.x}:${spki.y}`;                // 04 (uncompressed) public key
+  }
+  return spki;
+}
 
 const getX509Ext = (extensions, v) => {
   for (var extension in extensions) {
@@ -12,14 +48,39 @@ const getX509Ext = (extensions, v) => {
       return extensions[extension];
     }
   }
-
   return {
     extnValue: undefined,
     parsedValue: undefined,
   };
-
 };
 
+const getKeyUsages = (x509, criticalExtensions) => {
+  let keyUsages = {
+    critical: criticalExtensions.includes('2.5.29.15'),
+    purposes: [],
+  };
+
+  let keyUsagesBS = getX509Ext(x509.extensions, '2.5.29.15').parsedValue;
+  if (keyUsagesBS !== undefined) {
+    // parse the bit string, shifting as necessary
+    let unusedBits = keyUsagesBS.valueBlock.unusedBits;
+    keyUsagesBS = parseInt(keyUsagesBS.valueBlock.valueHex, 16) >> unusedBits;
+
+    // iterate through the bit string
+    strings.keyUsages.slice(unusedBits - 1).forEach(usage => {
+      if (keyUsagesBS & 1) {
+        keyUsages.purposes.push(usage);
+      }
+
+      keyUsagesBS = keyUsagesBS >> 1;
+    });
+
+    // reverse the order for legibility
+    keyUsages.purposes.reverse();
+  };
+
+  return keyUsages;
+}
 
 const parseSubsidiary = (distinguishedNames) => {
   const subsidiary = {
@@ -55,106 +116,7 @@ const parseSubsidiary = (distinguishedNames) => {
   return subsidiary;
 };
 
-
-export const parse = async (certificate) => {
-  const supportedExtensions = [
-    '1.3.6.1.4.1.311.20.2',     // microsoft certificate type
-    '1.3.6.1.4.1.311.21.2',     // microsoft certificate previous hash
-    '1.3.6.1.4.1.311.21.7',     // microsoft certificate template
-    '1.3.6.1.4.1.311.21.1',    // microsoft certification authority renewal
-    '1.3.6.1.4.1.311.21.10',    // microsoft certificate policies
-    '1.3.6.1.4.1.11129.2.4.2',  // embedded scts
-    '1.3.6.1.5.5.7.1.1',        // authority info access
-    '1.3.6.1.5.5.7.1.24',       // ocsp stapling
-    '1.3.101.77',               // ct redaction - deprecated and not displayed
-    '2.5.29.14',                // subject key identifier
-    '2.5.29.15',                // key usages
-    '2.5.29.17',                // subject alt names
-    '2.5.29.19',                // basic constraints
-    '2.5.29.31',                // crl points
-    '2.5.29.32',                // certificate policies
-    '2.5.29.35',                // authority key identifier
-    '2.5.29.37',                // extended key usage
-  ];
-
-  // get the current time zone - note that there are some time zones that this doesn't easily
-  // match, for whatever reason.  https://github.com/april/certainly-something/issues/21
-  let timeZone = new Date().toString().match(/\(([A-Za-z\s].*)\)/);
-  if (timeZone === null) {    // America/Chicago
-    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  } else if (timeZone.length > 1) {
-    timeZone = timeZone[1];   // Central Daylight Time
-  } else {
-    timeZone = 'Local Time';  // not sure if this is right, but let's go with it for now
-  }
-
-  // parse the certificate
-  const asn1 = asn1js.fromBER(certificate);
-
-  let x509 = new Certificate({ schema: asn1.result });
-  x509 = x509.toJSON()
-
-  // convert the cert to PEM
-  const certBTOA = window.btoa(String.fromCharCode.apply(null, new Uint8Array(certificate))).match(/.{1,64}/g).join('\r\n');
-
-  // get which extensions are critical
-  const criticalExtensions = [];
-  x509.extensions.forEach(ext => {
-    if (ext.hasOwnProperty('critical') && ext.critical === true) {
-      criticalExtensions.push(ext.extnID);
-    }
-  });
-
-  // get the public key info
-  let spki = Object.assign({
-    crv: undefined,
-    e: undefined,
-    kty: undefined,
-    n: undefined,
-    keysize: undefined,
-    x: undefined,
-    xy: undefined,
-    y: undefined,
-  }, x509.subjectPublicKeyInfo);
-
-  if (spki.kty === 'RSA') {
-    spki.e = b64urltodec(spki.e);                      // exponent
-    spki.keysize = b64urltohex(spki.n).length * 8;     // key size in bits
-    spki.n = hashify(b64urltohex(spki.n));             // modulus
-  } else if (spki.kty === 'EC') {
-    spki.kty = 'Elliptic Curve';
-    spki.keysize = parseInt(spki.crv.split('-')[1])    // this is a bit hacky
-    spki.x = hashify(b64urltohex(spki.x));             // x coordinate
-    spki.y = hashify(b64urltohex(spki.y));             // y coordinate
-    spki.xy = `04:${spki.x}:${spki.y}`;                // 04 (uncompressed) public key
-  }
-
-  // get the keyUsages
-  const keyUsages = {
-    critical: criticalExtensions.includes('2.5.29.15'),
-    purposes: [],
-  };
-
-  let keyUsagesBS = getX509Ext(x509.extensions, '2.5.29.15').parsedValue;
-  if (keyUsagesBS !== undefined) {
-    // parse the bit string, shifting as necessary
-    let unusedBits = keyUsagesBS.valueBlock.unusedBits;
-    keyUsagesBS = parseInt(keyUsagesBS.valueBlock.valueHex, 16) >> unusedBits;
-
-    // iterate through the bit string
-    strings.keyUsages.slice(unusedBits - 1).forEach(usage => {
-      if (keyUsagesBS & 1) {
-        keyUsages.purposes.push(usage);
-      }
-
-      keyUsagesBS = keyUsagesBS >> 1;
-    })
-
-    // reverse the order for legibility
-    keyUsages.purposes.reverse();
-  };
-
-  // get the subjectAltNames
+const getSubjectAltNames = (x509, criticalExtensions) => {
   let san = getX509Ext(x509.extensions, '2.5.29.17').parsedValue;
   if (san && san.hasOwnProperty('altNames')) {
     san = Object.keys(san.altNames).map(x => {
@@ -180,13 +142,14 @@ export const parse = async (certificate) => {
   } else {
     san = [];
   }
-
   san = {
     altNames: san,
     critical: criticalExtensions.includes('2.5.29.17'),
   };
+  return san;
+}
 
-  // get the basic constraints
+const getBasicConstraints = (x509, criticalExtensions) => {
   let basicConstraints;
   const basicConstraintsExt = getX509Ext(x509.extensions, '2.5.29.19');
   if (basicConstraintsExt && basicConstraintsExt.parsedValue) {
@@ -195,8 +158,10 @@ export const parse = async (certificate) => {
       critical: criticalExtensions.includes('2.5.29.19'),
     };
   }
+  return basicConstraints;
+}
 
-  // get the extended key usages
+const getEKeyUsages = (x509, criticalExtensions) => {
   let eKeyUsages = getX509Ext(x509.extensions, '2.5.29.37').parsedValue;
   if (eKeyUsages) {
     eKeyUsages = {
@@ -204,8 +169,10 @@ export const parse = async (certificate) => {
       purposes: eKeyUsages.keyPurposes.map(x => strings.eKU[x] || x),
     }
   }
+  return eKeyUsages;
+}
 
-  // get the subject key identifier
+const getSubjectKeyID = (x509, criticalExtensions) => {
   let sKID = getX509Ext(x509.extensions, '2.5.29.14').parsedValue;
   if (sKID) {
     sKID = {
@@ -213,8 +180,10 @@ export const parse = async (certificate) => {
       id: hashify(sKID.valueBlock.valueHex),
     }
   }
+  return sKID;
+}
 
-  // get the authority key identifier
+const getAuthorityKeyID = (x509, criticalExtensions) => {
   let aKID = getX509Ext(x509.extensions, '2.5.29.35').parsedValue;
   if (aKID) {
     aKID = {
@@ -222,8 +191,10 @@ export const parse = async (certificate) => {
       id: hashify(aKID.keyIdentifier.valueBlock.valueHex),
     }
   }
+  return aKID;
+}
 
-  // get the CRL points
+const getCRLPoints = (x509, criticalExtensions) => {
   let crlPoints = getX509Ext(x509.extensions, '2.5.29.31').parsedValue;
   if (crlPoints) {
     crlPoints = {
@@ -231,7 +202,10 @@ export const parse = async (certificate) => {
       points: crlPoints.distributionPoints.map(x => x.distributionPoint[0].value),
     };
   }
+  return crlPoints;
+}
 
+const getOcspStaple = (x509, criticalExtensions) => {
   let ocspStaple = getX509Ext(x509.extensions, '1.3.6.1.5.5.7.1.24').extnValue;
   if (ocspStaple && ocspStaple.valueBlock.valueHex === '3003020105') {
     ocspStaple = {
@@ -244,8 +218,10 @@ export const parse = async (certificate) => {
       required: false,
     }
   }
+  return ocspStaple;
+}
 
-  // get the Authority Information Access
+const getAuthorityInfoAccess = (x509, criticalExtensions) => {
   let aia = getX509Ext(x509.extensions, '1.3.6.1.5.5.7.1.1').parsedValue;
   if (aia) {
     aia = aia.accessDescriptions.map(x => {
@@ -260,8 +236,10 @@ export const parse = async (certificate) => {
     descriptions: aia,
     critical: criticalExtensions.includes('1.3.6.1.5.5.7.1.1'),
   }
+  return aia;
+}
 
-  // get the embedded SCTs
+const getSCTs = (x509, criticalExtensions) => {
   let scts = getX509Ext(x509.extensions, '1.3.6.1.4.1.11129.2.4.2').parsedValue;
   if (scts) {
     scts = Object.keys(scts.timestamps).map(x => {
@@ -270,7 +248,7 @@ export const parse = async (certificate) => {
         logId: hashify(logId),
         name: ctLogNames.hasOwnProperty(logId) ? ctLogNames[logId] : undefined,
         signatureAlgorithm: `${scts.timestamps[x].hashAlgorithm.replace('sha', 'SHA-')} ${scts.timestamps[x].signatureAlgorithm.toUpperCase()}`,
-        timestamp: `${scts.timestamps[x].timestamp.toLocaleString()} (${timeZone})`,
+        timestamp: `${scts.timestamps[x].timestamp.toLocaleString()} (${getTimeZone()})`,
         version: scts.timestamps[x].version + 1,
       }
     });
@@ -282,8 +260,10 @@ export const parse = async (certificate) => {
     critical: criticalExtensions.includes('1.3.6.1.4.1.11129.2.4.2'),
     timestamps: scts,
   }
+  return scts;
+}
 
-  // Certificate Policies, this stuff is really messy
+const getCertificatePolicies = (x509, criticalExtensions) => {
   let cp = getX509Ext(x509.extensions, '2.5.29.32').parsedValue;
   if (cp && cp.hasOwnProperty('certificatePolicies')) {
     cp = cp.certificatePolicies.map(x => {
@@ -341,7 +321,10 @@ export const parse = async (certificate) => {
     critical: criticalExtensions.includes('2.5.29.32'),
     policies: cp,
   }
+  return cp;
+}
 
+const getMicrosoftCryptographicExtensions = (x509, criticalExtensions) => {
   // now let's parse the Microsoft cryptographic extensions
   let msCrypto = {
     caVersion: getX509Ext(x509.extensions, '1.3.6.1.4.1.311.21.1').parsedValue,
@@ -398,6 +381,62 @@ export const parse = async (certificate) => {
     msCrypto.certificateType ||
     msCrypto.previousHash) ? true : false;
 
+  return msCrypto;
+}
+
+export const parse = async (certificate) => { // certificate could be an array of BER or an array of buffers
+  const supportedExtensions = [
+    '1.3.6.1.4.1.311.20.2',     // microsoft certificate type
+    '1.3.6.1.4.1.311.21.2',     // microsoft certificate previous hash
+    '1.3.6.1.4.1.311.21.7',     // microsoft certificate template
+    '1.3.6.1.4.1.311.21.1',    // microsoft certification authority renewal
+    '1.3.6.1.4.1.311.21.10',    // microsoft certificate policies
+    '1.3.6.1.4.1.11129.2.4.2',  // embedded scts
+    '1.3.6.1.5.5.7.1.1',        // authority info access
+    '1.3.6.1.5.5.7.1.24',       // ocsp stapling
+    '1.3.101.77',               // ct redaction - deprecated and not displayed
+    '2.5.29.14',                // subject key identifier
+    '2.5.29.15',                // key usages
+    '2.5.29.17',                // subject alt names
+    '2.5.29.19',                // basic constraints
+    '2.5.29.31',                // crl points
+    '2.5.29.32',                // certificate policies
+    '2.5.29.35',                // authority key identifier
+    '2.5.29.37',                // extended key usage
+  ];
+
+  let timeZone = getTimeZone();
+
+  // parse the certificate
+  const asn1 = fromBER(certificate);
+
+  const x509 = new Certificate({ schema: asn1.result }).toJSON();
+
+  // convert the cert to PEM
+  const certBTOA = window.btoa(String.fromCharCode.apply(null, new Uint8Array(certificate))).match(/.{1,64}/g).join('\r\n');
+
+  // get which extensions are critical
+  const criticalExtensions = [];
+  x509.extensions.forEach(ext => {
+    if (ext.hasOwnProperty('critical') && ext.critical === true) {
+      criticalExtensions.push(ext.extnID);
+    }
+  });
+
+  const spki = getPublicKeyInfo(x509);
+  const keyUsages = getKeyUsages(x509, criticalExtensions);
+  const san = getSubjectAltNames(x509, criticalExtensions);
+  const basicConstraints = getBasicConstraints(x509, criticalExtensions);
+  const eKeyUsages = getEKeyUsages(x509, criticalExtensions);
+  const sKID = getSubjectKeyID(x509, criticalExtensions);
+  const aKID = getAuthorityKeyID(x509, criticalExtensions);
+  const crlPoints = getCRLPoints(x509, criticalExtensions);
+  const ocspStaple = getOcspStaple(x509, criticalExtensions);
+  const aia = getAuthorityInfoAccess(x509, criticalExtensions);
+  const scts = getSCTs(x509, criticalExtensions);
+  const cp = getCertificatePolicies(x509, criticalExtensions);
+  const msCrypto = getMicrosoftCryptographicExtensions(x509, criticalExtensions);
+
   // determine which extensions weren't supported
   let unsupportedExtensions = [];
   x509.extensions.forEach(ext => {
@@ -405,8 +444,6 @@ export const parse = async (certificate) => {
       unsupportedExtensions.push(ext.extnID);
     }
   });
-
-  // console.log('returning from parse() for cert', x509);
 
   // the output shell
   return {
@@ -425,7 +462,7 @@ export const parse = async (certificate) => {
       san,
     },
     files: {
-      der: undefined,
+      der: undefined, // TODO: implement!
       pem: encodeURI(`-----BEGIN CERTIFICATE-----\r\n${certBTOA}\r\n-----END CERTIFICATE-----\r\n`),
     },
     fingerprint: {

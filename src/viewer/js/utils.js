@@ -44,6 +44,6 @@ export const hashify = (hash) => {
   }
 };
 
-export const pemToBER = (pem) => {
+export const pemToDER = (pem) => {
   return stringToArrayBuffer(window.atob(pem));
 };
