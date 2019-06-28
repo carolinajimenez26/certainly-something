@@ -273,7 +273,7 @@ const getCertificatePolicies = (x509, criticalExtensions) => {
       let value = strings.cps.hasOwnProperty(id) ? strings.cps[id].value : undefined;
 
       // ansi organization identifiers
-      if (id.startsWith('2.16.840')) {
+      if (id.startsWith('2.16.840.')) {
         value = id;
         id = '2.16.840';
         name = strings.cps['2.16.840'].name;

@@ -1,4 +1,4 @@
-import { parse } from './der.js';
+import { parse } from './certDecoder.js';
 import { pemToBER } from './utils.js';
 
 let template = require('../index.handlebars');
