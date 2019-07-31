@@ -423,20 +423,6 @@ export const parse = async (certificate) => { // certificate could be an array o
     }
   });
 
-  const spki = getPublicKeyInfo(x509);
-  const keyUsages = getKeyUsages(x509, criticalExtensions);
-  const san = getSubjectAltNames(x509, criticalExtensions);
-  const basicConstraints = getBasicConstraints(x509, criticalExtensions);
-  const eKeyUsages = getEKeyUsages(x509, criticalExtensions);
-  const sKID = getSubjectKeyID(x509, criticalExtensions);
-  const aKID = getAuthorityKeyID(x509, criticalExtensions);
-  const crlPoints = getCRLPoints(x509, criticalExtensions);
-  const ocspStaple = getOcspStaple(x509, criticalExtensions);
-  const aia = getAuthorityInfoAccess(x509, criticalExtensions);
-  const scts = getSCTs(x509, criticalExtensions);
-  const cp = getCertificatePolicies(x509, criticalExtensions);
-  const msCrypto = getMicrosoftCryptographicExtensions(x509, criticalExtensions);
-
   // determine which extensions weren't supported
   let unsupportedExtensions = [];
   x509.extensions.forEach(ext => {
@@ -448,18 +434,18 @@ export const parse = async (certificate) => { // certificate could be an array o
   // the output shell
   return {
     ext: {
-      aia,
-      aKID,
-      basicConstraints,
-      crlPoints,
-      cp,
-      eKeyUsages,
-      keyUsages,
-      msCrypto,
-      ocspStaple,
-      scts: scts,
-      sKID,
-      san,
+      aia: getAuthorityInfoAccess(x509, criticalExtensions),
+      aKID: getAuthorityKeyID(x509, criticalExtensions),
+      basicConstraints: getBasicConstraints(x509, criticalExtensions),
+      crlPoints: getCRLPoints(x509, criticalExtensions),
+      cp: getCertificatePolicies(x509, criticalExtensions),
+      eKeyUsages: getEKeyUsages(x509, criticalExtensions),
+      keyUsages: getKeyUsages(x509, criticalExtensions),
+      msCrypto: getMicrosoftCryptographicExtensions(x509, criticalExtensions),
+      ocspStaple: getOcspStaple(x509, criticalExtensions),
+      scts: getSCTs(x509, criticalExtensions),
+      sKID: getSubjectKeyID(x509, criticalExtensions),
+      san: getSubjectAltNames(x509, criticalExtensions),
     },
     files: {
       der: undefined, // TODO: implement!
@@ -478,7 +464,7 @@ export const parse = async (certificate) => { // certificate could be an array o
       name: strings.signature[getObjPath(x509, 'signature.algorithmId')],
       type: getObjPath(x509, 'signature.algorithmId'),
     },
-    subjectPublicKeyInfo: spki,
+    subjectPublicKeyInfo: getPublicKeyInfo(x509),
     unsupportedExtensions,
     version: (x509.version + 1).toString(),
   }
