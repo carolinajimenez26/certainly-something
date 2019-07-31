@@ -1,5 +1,5 @@
 import { parse } from './certDecoder.js';
-import { pemToBER } from './utils.js';
+import { pemToDER } from './utils.js';
 
 let template = require('../index.handlebars');
 
@@ -16,7 +16,7 @@ const buildChain = async (chain) => {
                       .split(/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----/g)
                       .filter(v => v.startsWith('MII'));
 
-    builtChain = builtChain.map(cert => { return pemToBER(cert) });
+    builtChain = builtChain.map(cert => { return pemToDER(cert) });
   } else if (chain.buffer) {   // DER encoded
     builtChain = [ chain.buffer ];
   } else if (typeof chain === 'object' && Array.isArray(chain)) {
