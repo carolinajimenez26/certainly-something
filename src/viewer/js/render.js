@@ -159,6 +159,7 @@ const handleDOMContentLoaded = async () => {
 
         // stuff the parsed certificate chain into securityInfo
         response['certs'] = await buildChain(response['certificates']);
+        console.log("certs ", response['certs']);
 
         // now we need to copy over any isBuiltInRoot stuff
         response.certificates.forEach((certificate, i) => {
